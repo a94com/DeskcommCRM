@@ -22,6 +22,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { metaContactsPayload } from "@/lib/channels/meta/contact-card";
 import { resolveMetaCreds } from "../meta/credentials";
+import { MAX_MEDIA_BYTES, MediaTooLargeError, type FetchedMedia } from "@/lib/messaging/media/types";
 import type {
   ChannelAdapter,
   ChannelHealth,
@@ -29,6 +30,10 @@ import type {
   OutboundEnvelope,
   RecipientInput,
 } from "../types";
+
+// Espelha o teto do irmão WAHA (`lib/messaging/media/waha-source.ts`): um
+// endpoint pendurado não pode segurar o drain do worker nem a rota de proxy.
+const FETCH_TIMEOUT_MS = 15_000;
 
 /** Só dígitos. `+55 (31) 99896-6398` → `5531998966398`. */
 function toE164Digits(raw: string): string {
@@ -177,6 +182,76 @@ export const metaCloudAdapter: ChannelAdapter = {
       const detail = err instanceof Error ? err.message : "erro_desconhecido";
       return { reachable: false, status: null, detail: detail.slice(0, 200) };
     }
+  },
+
+  /**
+   * Baixa o binário do anexo que o webhook anunciou.
+   *
+   * ─── Por que este método faltava, e o que isso custava ─────────────────────
+   * Sem ele o worker de persistência (`workers/media-persist-worker.ts`) e a
+   * rota de proxy (`app/api/v1/messages/[id]/media/route.ts`) fazem
+   * `if (!adapter.fetchInboundMedia) …` e PULAM — mesmo com `media_url`
+   * preenchido, mesmo com o evento emitido. Toda mídia recebida por este canal
+   * (áudio, imagem, vídeo, documento) virava linha SEM bytes: o atendente via
+   * "🎤 Mensagem de voz" na prévia e uma bolha vazia na conversa — o mesmo
+   * defeito que `tests/unit/midia-de-entrada-por-canal.test.ts` mediu e
+   * consertou no canal intermediado, só que nunca fechado aqui.
+   *
+   * ─── Duas chamadas, o MESMO Bearer nas duas ────────────────────────────────
+   * A Cloud API não manda URL de download no webhook — só um ID que expira.
+   * `GET /{media-id}` devolve a URL temporária; `GET` nessa URL (de novo com o
+   * Bearer, senão 401) devolve os bytes. `ingestMetaInbound` grava esse ID em
+   * `media_url` — o campo é "a URL como o provider anunciou" (`types.ts`), e
+   * para este canal o que ele anuncia é o ID, não uma URL de fato.
+   *
+   * Sem SSRF a checar aqui (diferente do canal intermediado, que recebe uma
+   * URL absoluta do payload): o primeiro fetch vai para um host FIXO
+   * (`graph.facebook.com`), nunca para o que o payload disser, e o segundo usa
+   * a URL que a PRÓPRIA Graph API devolveu — não o webhook.
+   */
+  async fetchInboundMedia(
+    input: ChannelTenantScope & { sessionRef: string; url: string; hintMime?: string | null },
+  ): Promise<FetchedMedia> {
+    const creds = await resolveMetaCreds(createAdminClient(), {
+      organizationId: input.organizationId,
+      phoneNumberId: input.sessionRef,
+    });
+    if (!creds) throw new Error("meta_not_configured: sem credencial para baixar a mídia.");
+
+    const auth = { Authorization: `Bearer ${creds.token}` };
+
+    const lookup = await fetch(
+      `https://graph.facebook.com/${creds.graphVersion}/${encodeURIComponent(input.url)}`,
+      { headers: auth, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) },
+    );
+    if (!lookup.ok) throw new Error(`meta_media_lookup_${lookup.status}`);
+    const info = (await lookup.json().catch(() => ({}))) as {
+      url?: string;
+      mime_type?: string;
+      file_size?: number;
+    };
+    // `file_size` vem no lookup, ANTES de baixar um byte — checar aqui evita
+    // puxar um arquivo grande inteiro só para descartá-lo por tamanho.
+    if (info.file_size && info.file_size > MAX_MEDIA_BYTES) throw new MediaTooLargeError();
+    if (!info.url) throw new Error("meta_media_sem_url_de_download");
+
+    const res = await fetch(info.url, { headers: auth, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    if (!res.ok) throw new Error(`meta_media_download_${res.status}`);
+
+    const declarado = Number(res.headers.get("content-length") ?? 0);
+    if (declarado > MAX_MEDIA_BYTES) throw new MediaTooLargeError();
+
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (buffer.byteLength > MAX_MEDIA_BYTES) throw new MediaTooLargeError();
+
+    // O `content-type` da resposta manda sobre a dica do webhook — é o
+    // padrão já usado pelo irmão WAHA (`waha-source.ts`) e pelo intermediado.
+    const mime =
+      res.headers.get("content-type")?.split(";")[0]?.trim() ||
+      info.mime_type ||
+      input.hintMime ||
+      "application/octet-stream";
+    return { buffer, mime };
   },
 
   codes: {

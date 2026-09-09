@@ -29,6 +29,7 @@ import { encontrarContatoPorTelefone } from "../contato-por-telefone";
 import { canonicalPhoneBR, phoneLookupVariants } from "../phone-variants";
 import type { ChannelTenantScope } from "../types";
 import type { InboundMessageEvent } from "./webhook";
+import { logger } from "@/lib/logger";
 
 type Admin = SupabaseClient;
 
@@ -180,6 +181,17 @@ export async function ingestMetaInbound(
       type: e.type === "text" ? "text" : e.type,
       body: e.type === "contact" ? (e.sharedContact?.name ?? e.text) : e.text,
       external_id: e.externalId,
+      // A Cloud API não manda URL pronta pro anexo (o `media.url` do payload é
+      // sempre nulo na prática — conferido contra o parser em `webhook.ts`):
+      // manda um ID que expira e exige lookup em duas chamadas. Gravamos o ID
+      // aqui mesmo assim, porque é ISTO que o worker de persistência confere
+      // (`if (!msg?.media_url) return … "no media_url"`) antes de acordar —
+      // sem ele a mídia deste canal nunca ganha bytes, igual ao defeito que
+      // `tests/unit/midia-de-entrada-por-canal.test.ts` mediu no outro canal.
+      // Quem sabe que este campo é um ID, e não uma URL de fato, é o adapter
+      // (`meta-cloud.ts#fetchInboundMedia`) — o contrato do seam já diz "cada
+      // canal sabe o que fazer com ela".
+      media_url: e.media?.id ?? null,
       media_mime: e.media?.mime ?? null,
       sent_at: e.sentAt.toISOString(),
       metadata: {
@@ -208,6 +220,11 @@ export async function ingestMetaInbound(
   } as never);
 
   const messageId = (inserida as { id: string } | null)?.id ?? "";
+  // Só acorda o worker quando HÁ anexo — pedir persistência de mensagem sem
+  // mídia faria ele buscar uma URL que não existe e marcar `failed` à toa.
+  if (e.media && messageId) {
+    await pedirPersistenciaDaMidia(admin, orgId, conversationId as string, messageId);
+  }
   await aplicarEfeitosPosEntrada(admin, {
     organizationId: orgId,
     contactId: contactId as string,
@@ -224,4 +241,37 @@ export async function ingestMetaInbound(
     messageId,
     conversationId: conversationId as string,
   };
+}
+
+/**
+ * Pede a persistência dos bytes do anexo.
+ *
+ * Mesmo evento e mesmo payload que o outro canal emite — o consumidor é o
+ * único (`workers/media-persist-worker.ts`), e um payload diferente por canal
+ * faria o worker adivinhar de quem veio (ver `tests/unit/midia-de-entrada-por-canal.test.ts`).
+ *
+ * Best-effort: a mensagem já está gravada e visível. Derrubar a ingestão aqui
+ * devolveria 500 à Meta, que reenviaria tudo — trocaria uma mídia faltando por
+ * uma tempestade de reentregas.
+ */
+async function pedirPersistenciaDaMidia(
+  admin: Admin,
+  organizationId: string,
+  conversationId: string,
+  messageId: string,
+): Promise<void> {
+  const { error } = await admin.rpc("emit_event" as never, {
+    p_event_type: "media.persist_requested",
+    p_entity_kind: "message",
+    p_entity_id: messageId,
+    p_payload: { message_id: messageId, conversation_id: conversationId },
+    p_metadata: { source: "meta_webhook" },
+    p_organization_id: organizationId,
+  } as never);
+  if (error) {
+    logger.warn("[meta] emit media.persist_requested falhou", {
+      messageId,
+      detail: error.message,
+    });
+  }
 }
