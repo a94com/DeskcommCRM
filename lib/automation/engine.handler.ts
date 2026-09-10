@@ -6,7 +6,14 @@ import "@/lib/automation/actions/register-all";
 
 export const automationRulesHandler: EventHandler = {
   key: AUTOMATION_CONSUMER_KEY,
-  events: ["lead.created", "lead.stage_changed", "message.received", "lead.tag_added", "contact.tag_added"],
+  events: [
+    "lead.created",
+    "lead.stage_changed",
+    "message.received",
+    "message.sent",
+    "lead.tag_added",
+    "contact.tag_added",
+  ],
   async handle(row) {
     return runAutomationForEvent(createAdminClient(), row);
   },

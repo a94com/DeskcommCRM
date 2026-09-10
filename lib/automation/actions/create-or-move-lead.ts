@@ -31,6 +31,13 @@ async function execute(ctx: ActionCtx, config: Record<string, unknown>): Promise
     | { id: string; name?: string | null; display_name?: string | null; phone_number?: string | null }
     | undefined;
 
+  // Gatilho de MENSAGEM ("chegou"/"enviei") é sobre um card que JÁ existe — a
+  // intenção é MOVER, nunca CRIAR. Se o roteamento (`buildContext` →
+  // resolveActiveLeadForContact) não achou um card único, criar um novo aqui
+  // duplicaria o lead a cada mensagem. Melhor pular e o operador ver por quê.
+  const gatilhoDeMensagem =
+    ctx.event?.event_type === "message.received" || ctx.event?.event_type === "message.sent";
+
   const contactId = contact?.id ?? lead?.contact_id;
   handlerCtx.serviceOrigin = contactId
     ? (await originFromAutomationEvent(ctx, contactId)) ?? { kind: "unavailable", reason: "origin_capture_failed" }
@@ -43,6 +50,13 @@ async function execute(ctx: ActionCtx, config: Record<string, unknown>): Promise
       }
       await moveLeadHandler(ctx.admin, handlerCtx, lead.id, { to_stage_id: stageId });
       return { type: "create_or_move_lead", status: "success", detail: { moved: lead.id } };
+    }
+    if (gatilhoDeMensagem) {
+      return {
+        type: "create_or_move_lead",
+        status: "skipped",
+        detail: { reason: contact ? "sem_card_unico_para_mover" : "sem_contato" },
+      };
     }
     if (contact) {
       const created = await createLeadHandler(ctx.admin, handlerCtx, {

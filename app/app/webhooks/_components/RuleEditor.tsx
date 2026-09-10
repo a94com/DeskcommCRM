@@ -65,8 +65,19 @@ const STAGE_FIELD: CuratedField = {
   op: "eq",
   kind: "stage",
 };
+const LEAD_STAGE_FIELD: CuratedField = {
+  value: "lead.stage_id",
+  label: "Etapa atual do lead",
+  op: "eq",
+  kind: "stage",
+};
 const MESSAGE_FIELDS: CuratedField[] = [
   { value: "event.body_preview", label: "Texto da mensagem", op: "contains" },
+  { value: "contact.tags", label: "Tags do contato", op: "contains" },
+  LEAD_STAGE_FIELD,
+];
+const MESSAGE_SENT_FIELDS: CuratedField[] = [
+  LEAD_STAGE_FIELD,
   { value: "contact.tags", label: "Tags do contato", op: "contains" },
 ];
 const TAG_ADDED_FIELD: CuratedField = {
@@ -82,6 +93,7 @@ const CURATED_FIELDS: Record<TriggerEvent, CuratedField[]> = {
   "lead.created": LEAD_FIELDS,
   "lead.stage_changed": [...LEAD_FIELDS, STAGE_FIELD],
   "message.received": MESSAGE_FIELDS,
+  "message.sent": MESSAGE_SENT_FIELDS,
   "lead.tag_added": [...LEAD_FIELDS, TAG_ADDED_FIELD],
   "contact.tag_added": [TAG_ADDED_FIELD],
 };

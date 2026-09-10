@@ -18,6 +18,7 @@ export const TRIGGER_LABELS: Record<TriggerEvent, string> = {
   "lead.created": "Quando entrar um contato novo (webhook)",
   "lead.stage_changed": "Quando um lead mudar de etapa",
   "message.received": "Quando chegar mensagem no WhatsApp",
+  "message.sent": "Quando você enviar uma mensagem ao lead",
   "lead.tag_added": "Quando um lead ganhar uma tag",
   "contact.tag_added": "Quando um contato ganhar uma tag",
 };

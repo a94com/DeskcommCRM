@@ -19,6 +19,7 @@ import type { EventRow, HandlerResult } from "@/lib/event-log/dispatcher";
 import { evaluateConditions, type RuleCondition } from "@/lib/automation/conditions";
 import { getAction } from "@/lib/automation/actions";
 import type { ActionResultDetail } from "@/lib/automation/types";
+import { resolveActiveLeadForContact, type LeadCandidate } from "@/lib/leads/active-lead";
 import { audit } from "@/lib/audit";
 import { logger } from "@/lib/logger";
 
@@ -30,6 +31,7 @@ const EXPECTED_ENTITY_KIND: Record<string, string> = {
   "lead.tag_added": "crm_lead",
   "contact.tag_added": "contact",
   "message.received": "message",
+  "message.sent": "message",
 };
 
 interface RuleRow {
@@ -73,7 +75,18 @@ export async function buildContext(admin: SupabaseClient, row: EventRow): Promis
       .maybeSingle();
     if (contact) context.contact = contact;
   } else if (row.entity_kind === "message" && row.entity_id) {
-    const contactId = row.payload.contact_id as string | undefined;
+    // `message.received` traz `contact_id` no payload; `message.sent` traz só
+    // `conversation_id` — resolve o contato pela conversa nesse caso.
+    let contactId = row.payload.contact_id as string | undefined;
+    if (!contactId && typeof row.payload.conversation_id === "string") {
+      const { data: conv } = await admin
+        .from("conversations")
+        .select("contact_id")
+        .eq("id", row.payload.conversation_id)
+        .eq("organization_id", org)
+        .maybeSingle();
+      contactId = (conv as { contact_id?: string } | null)?.contact_id ?? undefined;
+    }
     if (contactId) {
       const { data: contact } = await admin
         .from("contacts")
@@ -82,6 +95,38 @@ export async function buildContext(admin: SupabaseClient, row: EventRow): Promis
         .eq("organization_id", org)
         .maybeSingle();
       if (contact) context.contact = contact;
+
+      // Evento de MENSAGEM não carrega o card do funil — sem isto, uma regra
+      // "quando chegar/enviar mensagem → mover lead" não teria o que mover
+      // (`create_or_move_lead` cairia no ramo de CRIAR e duplicaria o card).
+      // Roteia pelo MESMO critério do agente (`resolveActiveLeadForContact`):
+      // negócio aberto mais ativo, preferindo o pipeline default; empate real
+      // não adivinha — deixa `context.lead` vazio e a ação pula.
+      const { data: candidatos } = await admin
+        .from("crm_leads")
+        .select("id, organization_id, pipeline_id, status, last_activity_at, created_at")
+        .eq("contact_id", contactId)
+        .eq("organization_id", org);
+      if (candidatos && candidatos.length > 0) {
+        const { data: pipelinePadrao } = await admin
+          .from("crm_pipelines")
+          .select("id")
+          .eq("organization_id", org)
+          .eq("is_default", true)
+          .maybeSingle();
+        const rota = resolveActiveLeadForContact(candidatos as LeadCandidate[], {
+          defaultPipelineId: (pipelinePadrao as { id?: string } | null)?.id ?? null,
+        });
+        if (rota.routed) {
+          const { data: lead } = await admin
+            .from("crm_leads")
+            .select("*")
+            .eq("id", rota.leadId)
+            .eq("organization_id", org)
+            .maybeSingle();
+          if (lead) context.lead = lead;
+        }
+      }
     }
   }
   return context;
