@@ -15,6 +15,7 @@ import type { NextRequest, NextResponse } from "next/server";
 
 import { fail, ok } from "@/lib/api/wrappers";
 import { requireRole } from "@/lib/auth/require-role";
+import type { Role } from "@/lib/auth/types";
 import { metaSessionForOrg } from "@/lib/channels/meta/session";
 import { normalizeRejectedReason } from "@/lib/channels/meta/webhook";
 import { deriveTemplateContract, describeAddress } from "@/lib/channels/meta/template-contract";
@@ -76,15 +77,20 @@ type OrgGate =
   | { autorizado: true; orgId: string }
   | { autorizado: false; resposta: NextResponse };
 
-async function orgOrFail(requestId: string): Promise<OrgGate> {
-  const authz = await requireRole("admin", { requestId, resource: "channels_templates" });
+// LER a lista (o que a tela de conversa mostra pro operador escolher qual
+// template disparar) é `agent` — o MESMO nível de `POST /api/v1/messages`, que
+// é quem de fato envia. Gatear a leitura acima do envio deixava o operador sem
+// ver o que ele já tem permissão de mandar, forçando admin pra quem só atende.
+// Sincronizar/criar/apagar definição segue `admin` (POST/DELETE abaixo).
+async function orgOrFail(requestId: string, min: Role = "admin"): Promise<OrgGate> {
+  const authz = await requireRole(min, { requestId, resource: "channels_templates" });
   if (!authz.ok) return { autorizado: false, resposta: authz.response };
   return { autorizado: true, orgId: authz.org.orgId };
 }
 
 export async function GET(): Promise<NextResponse> {
   const requestId = randomUUID();
-  const r = await orgOrFail(requestId);
+  const r = await orgOrFail(requestId, "agent");
   if (!r.autorizado) return r.resposta;
 
   const sessao = await metaSessionForOrg(r.orgId);
