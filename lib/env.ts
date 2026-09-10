@@ -93,6 +93,17 @@ const schema = z.object({
    */
   WEBHOOK_LOG_ROW_RETENTION_DAYS: diasDeRetencao("WEBHOOK_LOG_ROW_RETENTION_DAYS", 90),
   /**
+   * `"true"` faz a captação por webhook (`/webhooks/in/[token]`) ABRIR a conversa
+   * 1:1 do contato na sessão de canal ativa, logo depois de criar o lead —
+   * vazia, sem mensagem. Existe para o operador poder ir do card do funil
+   * direto para o Inbox e disparar um template, sem passar por Contatos.
+   * `z.string()` e não `z.enum` pelo mesmo motivo das outras alavancas deste
+   * arquivo: valor digitado errado degrada (não abre a conversa), não derruba a
+   * captação. Off por padrão — abrir conversa para todo lead de formulário é
+   * mudança de comportamento que cada instalação liga se quiser.
+   */
+  WEBHOOK_IN_OPEN_CONVERSATION: z.string().optional().default("false"),
+  /**
    * Retenção do HISTÓRICO de leads captados (`webhook_lead_captures`).
    *
    * Horizonte muito mais longo que o do arquivo forense acima, e a diferença é

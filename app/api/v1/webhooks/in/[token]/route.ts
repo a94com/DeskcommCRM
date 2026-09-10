@@ -34,6 +34,8 @@ import { decryptWebhookSecret } from "@/lib/webhooks/secrets";
 import { ApiError } from "@/lib/api/types";
 import { autorizarContatoParaIA } from "@/lib/ai/elegibilidade/autorizacao";
 import { kickLocalPipeline } from "@/lib/dev/kick-local-pipeline";
+import { ensureConversation, sessaoProntaParaEnvio } from "@/lib/automation/start-conversation";
+import { env } from "@/lib/env";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -553,6 +555,28 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
     .from("webhook_sources")
     .update({ last_received_at: new Date().toISOString() })
     .eq("id", source.id);
+
+  // Conversa 1:1 vazia, opt-in por `WEBHOOK_IN_OPEN_CONVERSATION` (ver lib/env.ts).
+  // Best-effort e DEPOIS do lead já gravado: o card do funil é o produto aqui, a
+  // conversa é conveniência de navegação. `ensureConversation` reabre a fechada e
+  // é idempotente pelo índice único (org, contato, sessão) — reenvio não duplica.
+  // Sem sessão de canal na org: pula em silêncio (webhook de formulário numa org
+  // que ainda não conectou WhatsApp não é erro).
+  if (env.WEBHOOK_IN_OPEN_CONVERSATION === "true" && contactId) {
+    try {
+      const sessionId = await sessaoProntaParaEnvio(admin, source.organization_id as string);
+      if (sessionId) {
+        await ensureConversation(admin, source.organization_id as string, contactId, sessionId);
+      }
+    } catch (err) {
+      logger.warn("[webhooks.inbound] abrir conversa falhou", {
+        webhookSourceId: source.id,
+        organizationId: source.organization_id,
+        contactId,
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   await audit({
     action: "webhook.lead_received",
