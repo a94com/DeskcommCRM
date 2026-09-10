@@ -46,6 +46,22 @@ interface RouteCtx {
 
 const RATE_LIMIT_PER_MIN = 60;
 
+// CORS: esta rota É captação pública de lead (formulário em site de terceiro,
+// página estática, etc.). Sem os cabeçalhos abaixo o navegador BLOQUEIA o POST
+// de outra origem no preflight — e "só dá pra chamar do servidor" contradiz o
+// propósito da rota. `*` não afeta segurança aqui: o token no path é o gate, o
+// rate-limit está de pé, e a rota não lê cookie nenhum (nada a roubar via CORS).
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "content-type, x-deskcomm-signature",
+  "Access-Control-Max-Age": "86400",
+};
+
+export async function OPTIONS(): Promise<NextResponse> {
+  return new NextResponse(null, { status: 204, headers: CORS_HEADERS });
+}
+
 // ponytail: mirrors the default phone aliases in lib/webhooks/inbound.ts —
 // duplicated (not exported there) only so the route can flag a phone-looking
 // field that failed normalizePhoneBR, for observability. Keep in sync if that
@@ -66,6 +82,12 @@ function findRawPhoneIfUnnormalized(payload: Record<string, unknown>, fieldMap: 
 }
 
 export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextResponse> {
+  const res = await handlePost(req, ctx);
+  for (const [k, v] of Object.entries(CORS_HEADERS)) res.headers.set(k, v);
+  return res;
+}
+
+async function handlePost(req: NextRequest, ctx: RouteCtx): Promise<NextResponse> {
   const requestId = randomUUID();
   const { token } = await ctx.params;
   if (!token || token.length < 8) {
