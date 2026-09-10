@@ -508,6 +508,20 @@ async function handlePost(req: NextRequest, ctx: RouteCtx): Promise<NextResponse
     }
   }
 
+  // `descricao`/`description` no payload preenche o campo Descrição do lead — e
+  // sai dos custom_fields, senão apareceria duas vezes no card. É o único campo
+  // "de conteúdo" do lead que o `field_map` não cobre (ele só faz nome/tel/email),
+  // e o que integrações mais pedem depois desses três.
+  let descricaoDoLead: string | null = null;
+  for (const alvo of ["descricao", "descrição", "description"]) {
+    const chave = Object.keys(mapped.custom_fields).find((c) => c.toLowerCase() === alvo);
+    if (chave !== undefined) {
+      const v = mapped.custom_fields[chave];
+      if (typeof v === "string" && v.trim()) descricaoDoLead = v.trim().slice(0, 2000);
+      delete mapped.custom_fields[chave];
+    }
+  }
+
   const leadInput: CreateLeadInput & {
     custom_fields?: Record<string, unknown>;
     source_metadata?: Record<string, unknown>;
@@ -522,6 +536,7 @@ async function handlePost(req: NextRequest, ctx: RouteCtx): Promise<NextResponse
     currency: "BRL",
     tags: [],
     source: "webhook",
+    ...(descricaoDoLead ? { description: descricaoDoLead } : {}),
     custom_fields: mapped.custom_fields,
     source_metadata: { webhook_source_id: source.id, ...mapped.source_metadata },
     ...(externalId ? { external_id: externalId } : {}),
