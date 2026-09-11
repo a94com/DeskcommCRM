@@ -21,9 +21,11 @@ import { activityLabel, actorLabel, actorShape } from "@/lib/leads/activity-voca
 import { ConversationTagsEditor } from "./ConversationTagsEditor";
 import { ContactTagsEditor } from "./ContactTagsEditor";
 import { useDefaultPipeline } from "@/hooks/pipelines/useDefaultPipeline";
+import { usePipelineStages } from "@/hooks/pipelines/usePipelineStages";
 import { NewLeadDialog } from "@/components/kanban/NewLeadDialog";
 import { CustomFieldsEditor, type CustomFieldDef } from "@/components/contacts/CustomFieldsEditor";
 import { useEditLead } from "@/hooks/kanban/useUpdateLead";
+import { useMoveCard } from "@/hooks/kanban/useMoveCard";
 import { cn } from "@/lib/utils";
 import { rotuloDoContato } from "@/lib/contacts/rotulo-do-contato";
 import { phoneForDisplay } from "@/lib/channels/phone-variants";
@@ -40,6 +42,7 @@ interface LeadRow {
   currency: string | null;
   updated_at: string;
   pipeline_id: string;
+  stage_id: string;
   custom_fields: Record<string, unknown> | null;
   field_defs: CustomFieldDef[];
 }
@@ -286,6 +289,91 @@ function SemLista({
 }
 
 /**
+ * Trocar a etapa do lead sem sair da conversa.
+ *
+ * Antes disso, mover um card era ir ao Kanban, achar o funil certo, arrastar.
+ * Quem atende já está OLHANDO o lead aqui — a etapa é o dado que ele mais
+ * muda no dia a dia (respondeu → em atendimento, fechou → primeiro contato
+ * da próxima leva) e não tinha onde fazer isso no lugar em que trabalha.
+ *
+ * Reaproveita a MESMA rota que o arrastar-e-soltar do board usa
+ * (`POST /leads/[id]/move` via `useMoveCard`) — nenhuma regra nova: mesma
+ * timeline, mesmo evento `lead.stage_changed`, mesma concorrência otimista
+ * por `expected_updated_at`.
+ *
+ * Etapas de PERDA ficam de fora (`is_lost`): o gatilho do banco
+ * (`fn_crm_lead_close_on_stage` + `fn_validate_lost_reason_required`) fecha o
+ * lead como perdido na hora e EXIGE um motivo que este seletor não coleta — um
+ * "mover" simples nessa etapa quebraria com erro do servidor. Perda continua
+ * pelo fluxo dedicado (board / ação "Perdido"), que pergunta o motivo.
+ */
+function MoverEtapa({
+  leadId,
+  pipelineId,
+  stageId,
+  updatedAt,
+  onMovido,
+}: {
+  leadId: string;
+  pipelineId: string;
+  stageId: string;
+  updatedAt: string;
+  onMovido: () => void;
+}) {
+  const t = useT();
+  const stages = usePipelineStages(pipelineId);
+  const moveCard = useMoveCard(pipelineId);
+
+  if (stages.isLoading) return <Skeleton className="h-7 w-full" />;
+  if (stages.isError || !stages.data) {
+    return <p className="text-xs text-muted-foreground">{t("Não consegui carregar as etapas deste funil.")}</p>;
+  }
+
+  const atual = stages.data.find((s) => s.id === stageId);
+  // A etapa vigente entra na lista mesmo se for de perda — senão o seletor
+  // mudaria o valor visível sem ninguém ter mexido em nada.
+  const opcoes = atual && atual.is_lost
+    ? stages.data
+    : stages.data.filter((s) => !s.is_lost);
+
+  return (
+    <label className="block text-xs">
+      <span className="text-muted-foreground">{t("Etapa")}</span>
+      <select
+        aria-label={t("Etapa do lead")}
+        data-testid="inbox-lead-etapa"
+        className="mt-1 w-full rounded-md border border-input bg-background p-1.5 text-xs disabled:opacity-50"
+        value={stageId}
+        disabled={moveCard.isPending}
+        onChange={(e) => {
+          const novaEtapaId = e.target.value;
+          if (novaEtapaId === stageId) return;
+          moveCard.mutate(
+            {
+              leadId,
+              stageId: novaEtapaId,
+              // Sem visão das outras posições da coluna destino aqui (este
+              // painel não carrega o board inteiro) — um relógio sempre cresce
+              // mais que qualquer posição fracionária já gravada, então o card
+              // cai no fim da etapa, do mesmo jeito que soltar por último.
+              positionInStage: Date.now(),
+              expectedUpdatedAt: updatedAt,
+            },
+            { onSuccess: onMovido },
+          );
+        }}
+      >
+        {opcoes.map((s) => (
+          <option key={s.id} value={s.id} disabled={s.is_lost && s.id !== stageId}>
+            {s.name}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/**
  * Só os campos do funil, no lugar onde a conversa acontece.
  *
  * Título, valor e tags já têm casa no dossiê. Quem atende descobre o dado
@@ -337,6 +425,14 @@ function InboxLeadEditor({
           {ativo.title} · {ativo.status}
         </p>
       )}
+      <MoverEtapa
+        key={`etapa-${ativo.id}`}
+        leadId={ativo.id}
+        pipelineId={ativo.pipeline_id}
+        stageId={ativo.stage_id}
+        updatedAt={ativo.updated_at}
+        onMovido={onSalvo}
+      />
       <CamposDoFunil
         key={ativo.id}
         leadId={ativo.id}
