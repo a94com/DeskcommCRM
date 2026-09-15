@@ -41,9 +41,30 @@ const ORG = "11111111-1111-4111-8111-111111111111";
 const SESSAO = "22222222-2222-4222-8222-222222222222";
 const CONTATO = "33333333-3333-4333-8333-333333333333";
 
-/** Dublê do admin — só a tabela `messages` importa pra este arquivo. */
-function bancoFalso(opts: { jaEnviado: boolean; erroNaLeitura?: boolean }) {
+/**
+ * Dublê do admin — `messages` (trava de duplicidade) e `meta_templates`
+ * (renderizar o `body` antes de enviar, ver `corpoRenderizado`). Sem
+ * `componentes`, cai no fallback "não espelhada" (`data: null`) e
+ * `corpoRenderizado` devolve `""` — os casos que checam o texto de verdade
+ * passam `componentes`.
+ */
+function bancoFalso(opts: {
+  jaEnviado: boolean;
+  erroNaLeitura?: boolean;
+  componentes?: Array<{ type: string; text: string }>;
+}) {
   const from = vi.fn((tabela: string) => {
+    if (tabela === "meta_templates") {
+      const encadeavelTpl: Record<string, unknown> = {};
+      for (const metodo of ["select", "eq"]) {
+        encadeavelTpl[metodo] = () => encadeavelTpl;
+      }
+      encadeavelTpl.maybeSingle = async () =>
+        opts.componentes
+          ? { data: { components: opts.componentes, parameter_format: "POSITIONAL" }, error: null }
+          : { data: null, error: null };
+      return encadeavelTpl;
+    }
     if (tabela !== "messages") throw new Error(`Tabela não prevista: ${tabela}`);
     const encadeavel: Record<string, unknown> = {};
     for (const metodo of ["select", "eq", "limit"]) {
@@ -152,6 +173,32 @@ describe("send_template — caminho feliz", () => {
 
     const [, , input] = sendMessageHandler.mock.calls[0]!;
     expect((input as { template_values: Record<string, string> }).template_values).toEqual({ "1": "Kamila" });
+  });
+
+  it("preenche body com o texto RENDERIZADO do template — achado ao ver o Inbox com balão vazio (2026-09-15)", async () => {
+    // `_handler.ts` só grava `template_name`/`template_language` no envio — quem
+    // decide o `body` é o CHAMADOR. Sem isto, a Meta manda o template de
+    // verdade e o Inbox mostra a conversa muda (aconteceu com dois leads reais
+    // antes deste caso existir).
+    const admin = bancoFalso({
+      jaEnviado: false,
+      componentes: [{ type: "BODY", text: "Oi {{1}}! Tudo bem?" }],
+    });
+
+    await executar(contexto(admin), { template_values: { "1": "Genivaldo" } });
+
+    const [, , input] = sendMessageHandler.mock.calls[0]!;
+    expect((input as { body: string }).body).toBe("Oi Genivaldo! Tudo bem?");
+  });
+
+  it("template não espelhado (sem componentes) manda body vazio, não falha o envio", async () => {
+    const admin = bancoFalso({ jaEnviado: false }); // sem `componentes`
+
+    const r = await executar(contexto(admin));
+
+    expect(r.status).toBe("success");
+    const [, , input] = sendMessageHandler.mock.calls[0]!;
+    expect((input as { body: string }).body).toBe("");
   });
 
   it("contato bloqueado/sem telefone é pulado antes mesmo de checar duplicidade", async () => {

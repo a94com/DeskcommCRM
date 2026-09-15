@@ -9,6 +9,7 @@ import { adiarAteAJanelaAbrir } from "@/lib/automation/janela-do-canal";
 import { sendMessageHandler } from "@/app/api/v1/messages/_handler";
 import { reportarEnvio, type MensagemEnviada } from "@/lib/automation/desfecho-do-envio";
 import { checarGuardasDeContato } from "@/lib/automation/guarda-do-contato";
+import { renderTemplateBody } from "@/lib/channels/meta/render-template";
 
 /**
  * Dispara um TEMPLATE APROVADO da Meta — não confundir com `send_whatsapp_message`
@@ -59,6 +60,46 @@ function lerConfig(config: Record<string, unknown>): ConfigDeTemplate | null {
  * (organization_id, template_name) que já existem pra outra finalidade —
  * nenhuma tabela ou índice novo.
  */
+/**
+ * O texto que o LEAD vai ler, com os `{{n}}` já substituídos — mesma função
+ * que o agente usa (`inbound-turn.ts`) e que a tela manual monta ANTES de
+ * chamar `/api/v1/messages` (`JanelaFechadaAviso.tsx`). Sem isto, `body` fica
+ * vazio: `_handler.ts` só grava `template_name`/`template_language` no envio
+ * (linha "Colunas só do template"), então o Inbox mostra um balão em branco
+ * mesmo com a Meta tendo aceitado e entregue o template de verdade — achado ao
+ * conferir dois envios reais desta automação (2026-09-15).
+ *
+ * Falha de leitura ou espelho vazio: mesma postura de `conferirDefinicao`
+ * ("não espelhada, deixa passar") — devolve `""` em vez de barrar o envio, já
+ * que o texto é só para exibição local; a Meta renderiza o template aprovado
+ * do lado dela independente disto.
+ */
+async function corpoRenderizado(
+  ctx: ActionCtx,
+  parsed: ConfigDeTemplate,
+  template_values: Record<string, string>,
+): Promise<string> {
+  const { data, error } = await ctx.admin
+    .from("meta_templates")
+    .select("components, parameter_format")
+    .eq("organization_id", ctx.organizationId)
+    .eq("name", parsed.template_name)
+    .eq("language", parsed.template_language)
+    .eq("channel_session_id", parsed.channel_session_id)
+    .maybeSingle();
+  if (error || !data) return "";
+  const linha = data as { components: unknown; parameter_format?: string };
+  try {
+    return renderTemplateBody(linha.components, template_values, {
+      name: parsed.template_name,
+      language: parsed.template_language,
+      parameterFormat: linha.parameter_format,
+    });
+  } catch {
+    return "";
+  }
+}
+
 async function jaEnviadoAEsteContato(
   ctx: ActionCtx,
   contactId: string,
@@ -127,6 +168,7 @@ async function execute(ctx: ActionCtx, config: Record<string, unknown>): Promise
     const template_values = Object.fromEntries(
       Object.entries(parsed.template_values ?? {}).map(([k, v]) => [k, renderTemplate(v, ctx.context)]),
     );
+    const body = await corpoRenderizado(ctx, parsed, template_values);
     const message = await sendMessageHandler(
       ctx.admin,
       {
@@ -142,6 +184,7 @@ async function execute(ctx: ActionCtx, config: Record<string, unknown>): Promise
         template_name: parsed.template_name,
         template_language: parsed.template_language,
         template_values,
+        body,
       } as Parameters<typeof sendMessageHandler>[2],
     );
     // O desfecho vem do ESTADO DA MENSAGEM, nunca da ausência de exceção —
