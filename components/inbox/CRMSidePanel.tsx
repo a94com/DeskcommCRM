@@ -13,6 +13,16 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Tag, Receipt, Users, ArrowRight } from "@/lib/ui/icons";
 import { apiClient } from "@/lib/api/client";
 import { toast } from "sonner";
@@ -22,6 +32,7 @@ import { ConversationTagsEditor } from "./ConversationTagsEditor";
 import { ContactTagsEditor } from "./ContactTagsEditor";
 import { useDefaultPipeline } from "@/hooks/pipelines/useDefaultPipeline";
 import { usePipelineStages } from "@/hooks/pipelines/usePipelineStages";
+import { previaDeReenvio } from "@/hooks/pipelines/useStageAutoTemplate";
 import { NewLeadDialog } from "@/components/kanban/NewLeadDialog";
 import { CustomFieldsEditor, type CustomFieldDef } from "@/components/contacts/CustomFieldsEditor";
 import { useEditLead } from "@/hooks/kanban/useUpdateLead";
@@ -312,17 +323,22 @@ function MoverEtapa({
   pipelineId,
   stageId,
   updatedAt,
+  contactId,
   onMovido,
 }: {
   leadId: string;
   pipelineId: string;
   stageId: string;
   updatedAt: string;
+  contactId: string | null;
   onMovido: () => void;
 }) {
   const t = useT();
   const stages = usePipelineStages(pipelineId);
   const moveCard = useMoveCard(pipelineId);
+  // Camada 2 da trava de duplicidade (mesma regra do Kanban, ver KanbanBoard.tsx):
+  // só pergunta quando ESTE contato já recebeu o template desta etapa.
+  const [pendingMove, setPendingMove] = useState<{ stageId: string; stageName: string; templateName: string } | null>(null);
 
   if (stages.isLoading) return <Skeleton className="h-7 w-full" />;
   if (stages.isError || !stages.data) {
@@ -336,40 +352,87 @@ function MoverEtapa({
     ? stages.data
     : stages.data.filter((s) => !s.is_lost);
 
+  const mover = (novaEtapaId: string) => {
+    moveCard.mutate(
+      {
+        leadId,
+        stageId: novaEtapaId,
+        // Sem visão das outras posições da coluna destino aqui (este
+        // painel não carrega o board inteiro) — um relógio sempre cresce
+        // mais que qualquer posição fracionária já gravada, então o card
+        // cai no fim da etapa, do mesmo jeito que soltar por último.
+        positionInStage: Date.now(),
+        expectedUpdatedAt: updatedAt,
+      },
+      { onSuccess: onMovido },
+    );
+  };
+
   return (
-    <label className="block text-xs">
-      <span className="text-muted-foreground">{t("Etapa")}</span>
-      <select
-        aria-label={t("Etapa do lead")}
-        data-testid="inbox-lead-etapa"
-        className="mt-1 w-full rounded-md border border-input bg-background p-1.5 text-xs disabled:opacity-50"
-        value={stageId}
-        disabled={moveCard.isPending}
-        onChange={(e) => {
-          const novaEtapaId = e.target.value;
-          if (novaEtapaId === stageId) return;
-          moveCard.mutate(
-            {
-              leadId,
-              stageId: novaEtapaId,
-              // Sem visão das outras posições da coluna destino aqui (este
-              // painel não carrega o board inteiro) — um relógio sempre cresce
-              // mais que qualquer posição fracionária já gravada, então o card
-              // cai no fim da etapa, do mesmo jeito que soltar por último.
-              positionInStage: Date.now(),
-              expectedUpdatedAt: updatedAt,
-            },
-            { onSuccess: onMovido },
-          );
-        }}
-      >
-        {opcoes.map((s) => (
-          <option key={s.id} value={s.id} disabled={s.is_lost && s.id !== stageId}>
-            {s.name}
-          </option>
-        ))}
-      </select>
-    </label>
+    <>
+      <label className="block text-xs">
+        <span className="text-muted-foreground">{t("Etapa")}</span>
+        <select
+          aria-label={t("Etapa do lead")}
+          data-testid="inbox-lead-etapa"
+          className="mt-1 w-full rounded-md border border-input bg-background p-1.5 text-xs disabled:opacity-50"
+          value={stageId}
+          disabled={moveCard.isPending}
+          onChange={(e) => {
+            const novaEtapaId = e.target.value;
+            if (novaEtapaId === stageId) return;
+            if (!contactId) {
+              mover(novaEtapaId);
+              return;
+            }
+            previaDeReenvio(pipelineId, novaEtapaId, contactId)
+              .then((previa) => {
+                if (previa.already_sent_to_contact) {
+                  setPendingMove({
+                    stageId: novaEtapaId,
+                    stageName: stages.data?.find((s) => s.id === novaEtapaId)?.name ?? "",
+                    templateName: previa.template_name ?? "",
+                  });
+                } else {
+                  mover(novaEtapaId);
+                }
+              })
+              // Mesma escolha do Kanban: falha em CONFERIR não trava o move —
+              // quem garante de verdade é a trava técnica no backend.
+              .catch(() => mover(novaEtapaId));
+          }}
+        >
+          {opcoes.map((s) => (
+            <option key={s.id} value={s.id} disabled={s.is_lost && s.id !== stageId}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <AlertDialog open={pendingMove !== null} onOpenChange={(v) => !v && setPendingMove(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("Mover mesmo assim?")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("Este contato já recebeu o template")} «{pendingMove?.templateName}»
+              {t(" antes. Mover para")} «{pendingMove?.stageName}» {t("de novo NÃO vai reenviar automaticamente.")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("Cancelar")}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (!pendingMove) return;
+                mover(pendingMove.stageId);
+                setPendingMove(null);
+              }}
+            >
+              {t("Mover")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }
 
@@ -384,11 +447,13 @@ function InboxLeadEditor({
   selecionadoId,
   onSelecionar,
   onSalvo,
+  contactId,
 }: {
   leads: LeadRow[];
   selecionadoId: string | null;
   onSelecionar: (id: string) => void;
   onSalvo: () => void;
+  contactId: string | null;
 }) {
   const ativo = leads.find((l) => l.id === selecionadoId) ?? leads[0]!;
 
@@ -431,6 +496,7 @@ function InboxLeadEditor({
         pipelineId={ativo.pipeline_id}
         stageId={ativo.stage_id}
         updatedAt={ativo.updated_at}
+        contactId={contactId}
         onMovido={onSalvo}
       />
       <CamposDoFunil
@@ -805,6 +871,7 @@ export function CRMSidePanel({ conversation }: Props) {
             selecionadoId={leadAtivoId}
             onSelecionar={setLeadAtivoId}
             onSalvo={recarregar}
+            contactId={contactId}
           /></fieldset>
         ) : (
           <SemLista vazio="Sem leads." erro={erro} onTentarDeNovo={() => setTentativa((n) => n + 1)} />

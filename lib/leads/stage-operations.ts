@@ -51,7 +51,7 @@ export interface DepsDeEtapa {
 
 /** As colunas que a tela e as regras usam. `position` entra: a reordenação calcula em cima dela. */
 const COLUNAS =
-  "id, name, slug, position, is_won, is_lost, is_archived, agent_stage_hint, last_change_actor_kind, last_change_at";
+  "id, name, slug, position, is_won, is_lost, is_archived, agent_stage_hint, expected_duration_hours, last_change_actor_kind, last_change_at";
 
 /** A etapa como sai para quem lê — inclui a autoria da última mudança de configuração. */
 export interface EtapaVisivel {
@@ -61,12 +61,15 @@ export interface EtapaVisivel {
   position: number;
   is_won: boolean;
   is_lost: boolean;
+  /** Limiar de "esfriou" desta etapa (Radar de Risco, `risk-radar.ts`). `null` = usa o padrão global (24h). */
+  expected_duration_hours: number | null;
   /** `user` | `ai` | `system` — `null` nas etapas anteriores a esta coluna. */
   last_change_actor_kind: string | null;
   last_change_at: string | null;
 }
 
 type EtapaLida = EtapaEditavel & {
+  expected_duration_hours: number | null;
   last_change_actor_kind: string | null;
   last_change_at: string | null;
 };
@@ -119,6 +122,7 @@ export function corpo(etapas: EtapaLida[]): { etapas: EtapaVisivel[] } {
         position: e.position,
         is_won: e.is_won,
         is_lost: e.is_lost,
+        expected_duration_hours: e.expected_duration_hours ?? null,
         last_change_actor_kind: e.last_change_actor_kind ?? null,
         last_change_at: e.last_change_at ?? null,
       })),
@@ -283,6 +287,14 @@ export interface PedidoDeEdicao {
    * duas divergiriam no primeiro ajuste.
    */
   depois_de?: string | null;
+  /**
+   * Limiar de "esfriou" desta etapa, em horas — alimenta o Radar de Risco
+   * (`resolveStageWindow` em `lib/leads/risk-radar.ts`, que já lê esta coluna
+   * e sempre leu; só não existia tela nenhuma que a escrevesse). `null` volta
+   * a etapa pro padrão global (24h/72h) — não é um valor mágico à parte, é a
+   * MESMA constante que já é o fallback de quem nunca configurou nada.
+   */
+  expected_duration_hours?: number | null;
 }
 
 export async function atualizarEtapa(
@@ -333,8 +345,15 @@ export async function atualizarEtapa(
     }
   }
 
-  const patchDoAlvo: PatchDeMarcacao & { name?: string; position?: number } = {};
+  const patchDoAlvo: PatchDeMarcacao & {
+    name?: string;
+    position?: number;
+    expected_duration_hours?: number | null;
+  } = {};
   if (pedido.name !== undefined) patchDoAlvo.name = pedido.name.trim();
+  if (pedido.expected_duration_hours !== undefined) {
+    patchDoAlvo.expected_duration_hours = pedido.expected_duration_hours;
+  }
 
   if (pedido.depois_de !== undefined) {
     // Só as ativas compõem a régua: arquivada não ocupa lugar no quadro.

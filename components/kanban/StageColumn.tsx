@@ -3,6 +3,8 @@ import { Droppable } from "@hello-pangea/dnd";
 import { useRef, type CSSProperties } from "react";
 import { useT } from "@/hooks/i18n/useT";
 import { cn } from "@/lib/utils";
+import { Gear } from "@/lib/ui/icons";
+import { Button } from "@/components/ui/button";
 import type { Lead } from "@/lib/types/leads";
 import type { Stage } from "@/lib/kanban/types";
 import { buildCardInput } from "@/lib/kanban/card-state";
@@ -33,6 +35,8 @@ interface StageColumnProps {
   onSelectMany?: (leadIds: string[], marcar: boolean) => void;
   /** Abrir o dossiê — atravessa o board até o card, como `pulses`. */
   onOpen?: (leadId: string) => void;
+  /** Abre o pop-up de configuração desta etapa (disparo automático + lead frio). */
+  onConfigure?: (stage: Stage) => void;
 }
 
 function formatBRL(cents: number): string {
@@ -59,6 +63,7 @@ export function StageColumn({
   pulses,
   onSelectMany,
   onOpen,
+  onConfigure,
 }: StageColumnProps) {
   const t = useT();
   const totalCents = leads.reduce((sum, l) => sum + (l.value_cents ?? 0), 0);
@@ -134,6 +139,18 @@ export function StageColumn({
         <span className="rounded-full bg-surface px-2 py-0.5 text-[11px] font-medium tabular-nums text-text-muted">
           {selecionadosAqui > 0 ? `${selecionadosAqui}/${leads.length}` : leads.length}
         </span>
+        {onConfigure ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 shrink-0 opacity-0 group-hover/etapa:opacity-100"
+            onClick={() => onConfigure(stage)}
+            aria-label={`${t("Configurar etapa")} ${stage.name}`}
+          >
+            <Gear size={14} weight="regular" aria-hidden />
+          </Button>
+        ) : null}
       </div>
 
       {totalCents > 0 && (

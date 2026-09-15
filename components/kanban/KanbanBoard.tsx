@@ -4,15 +4,27 @@ import { DragDropContext, type DropResult } from "@hello-pangea/dnd";
 import { useT } from "@/hooks/i18n/useT";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useBoard } from "@/hooks/kanban/useBoard";
 import { useMoveCard } from "@/hooks/kanban/useMoveCard";
 import { useAssignableMembers } from "@/hooks/inbox/useAssignableMembers";
 import { useAtRiskLeads } from "@/hooks/leads/useAtRiskLeads";
 import { useReactivations } from "@/hooks/leads/useReactivations";
 import { midpoint } from "@/lib/kanban/fractional-indexing";
+import { previaDeReenvio } from "@/hooks/pipelines/useStageAutoTemplate";
 import type { Lead } from "@/lib/types/leads";
 import type { Pipeline, Stage } from "@/lib/kanban/types";
 import { StageColumn } from "./StageColumn";
+import { StageConfigDialog } from "./StageConfigDialog";
 import { LeadDossier } from "./LeadDossier";
 import { camposDoFunil } from "@/lib/leads/campos-do-funil";
 
@@ -126,6 +138,22 @@ export function KanbanBoard({
   // aberto, o estado local manda (fechar não reabre pela URL).
   const [dossieId, setDossieId] = useState<string | null>(leadInicial ?? null);
   const [internalSelected, setInternalSelected] = useState<Set<string>>(new Set());
+  const [configStage, setConfigStage] = useState<Stage | null>(null);
+  /**
+   * Camada 2 da trava de duplicidade (pedido do usuário, 2026-09): só nasce
+   * quando o `previaDeReenvio` confirma que ESTE contato já recebeu o
+   * template desta etapa — não em todo arrasto. Guarda os dados do move pra
+   * executar se o operador confirmar; cancelar não move nada (o card já
+   * nem chegou a se mexer, porque `moveCard.mutate` só roda depois do sim).
+   */
+  const [pendingMove, setPendingMove] = useState<{
+    leadId: string;
+    stageId: string;
+    stageName: string;
+    templateName: string;
+    positionInStage: number;
+    expectedUpdatedAt: string;
+  } | null>(null);
   const selectedLeadIds = useMemo(
     () => (selectedIds ? new Set(selectedIds) : internalSelected),
     [selectedIds, internalSelected],
@@ -208,14 +236,44 @@ export function KanbanBoard({
         return;
       }
 
-      moveCard.mutate({
-        leadId: lead.id,
-        stageId: destStageId,
-        positionInStage: newPosition,
-        expectedUpdatedAt: lead.updated_at,
-      });
+      const doMove = () =>
+        moveCard.mutate({
+          leadId: lead.id,
+          stageId: destStageId,
+          positionInStage: newPosition,
+          expectedUpdatedAt: lead.updated_at,
+        });
+
+      // Camada 2 da trava de duplicidade: só pergunta se o destino tem
+      // disparo automático ATIVO e este contato já recebeu aquele template —
+      // pra lead novo entrando na etapa, move direto, sem fricção nenhuma (é
+      // o comportamento "automático" que é o ponto inteiro disso).
+      if (!lead.contact_id) {
+        doMove();
+        return;
+      }
+      void previaDeReenvio(pipelineId, destStageId, lead.contact_id)
+        .then((previa) => {
+          if (previa.already_sent_to_contact) {
+            const destStage = data.stages.find((s) => s.id === destStageId);
+            setPendingMove({
+              leadId: lead.id,
+              stageId: destStageId,
+              stageName: destStage?.name ?? "",
+              templateName: previa.template_name ?? "",
+              positionInStage: newPosition,
+              expectedUpdatedAt: lead.updated_at,
+            });
+          } else {
+            doMove();
+          }
+        })
+        // Falha em CONFERIR não pode travar o move — quem garante de verdade
+        // que não dobra o envio é a trava técnica no backend (send-template.ts),
+        // não este aviso. Falhar aberto aqui só significa "sem aviso desta vez".
+        .catch(() => doMove());
     },
-    [data, grouped, moveCard],
+    [data, grouped, moveCard, pipelineId],
   );
 
   if (isLoading) {
@@ -260,9 +318,46 @@ export function KanbanBoard({
             selectedLeadIds={selectedLeadIds}
             onSelectMany={handleSelectMany}
             onOpen={setDossieId}
+            onConfigure={setConfigStage}
           />
         ))}
       </div>
+      {configStage && (
+        <StageConfigDialog
+          open
+          onOpenChange={(v) => !v && setConfigStage(null)}
+          pipelineId={pipelineId}
+          stage={configStage}
+        />
+      )}
+      <AlertDialog open={pendingMove !== null} onOpenChange={(v) => !v && setPendingMove(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("Mover mesmo assim?")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("Este contato já recebeu o template")} «{pendingMove?.templateName}»
+              {t(" antes. Mover para")} «{pendingMove?.stageName}» {t("de novo NÃO vai reenviar automaticamente.")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("Cancelar")}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (!pendingMove) return;
+                moveCard.mutate({
+                  leadId: pendingMove.leadId,
+                  stageId: pendingMove.stageId,
+                  positionInStage: pendingMove.positionInStage,
+                  expectedUpdatedAt: pendingMove.expectedUpdatedAt,
+                });
+                setPendingMove(null);
+              }}
+            >
+              {t("Mover")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       {leadDoDossie && (
         <LeadDossier
           open

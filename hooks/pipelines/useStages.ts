@@ -37,6 +37,8 @@ export interface PatchDeEtapa {
   is_won?: boolean;
   is_lost?: boolean;
   depois_de?: string | null;
+  /** Limiar de "esfriou" desta etapa, em horas — `null` volta ao padrão global (24h). */
+  expected_duration_hours?: number | null;
 }
 
 function useReler(pipelineId: string) {

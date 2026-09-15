@@ -18,6 +18,7 @@ import {
 import { usePipelines, usePipelineStages } from "@/hooks/webhooks/useWebhookSources";
 import { useAgentsList } from "@/hooks/ai/useAgents";
 import { channelLabel, useChannelSessions } from "@/hooks/channels/useChannelSessions";
+import { useApprovedTemplates } from "@/hooks/channels/useApprovedTemplates";
 import { useAssignableMembers } from "@/hooks/inbox/useAssignableMembers";
 import { apiClient } from "@/lib/api/client";
 import type { FollowupFlowPointerRow } from "@/hooks/followup/useFollowupFlows";
@@ -25,6 +26,15 @@ import type { FollowupFlowPointerRow } from "@/hooks/followup/useFollowupFlows";
 export type ActionItem =
   | { type: "create_or_move_lead"; config: { pipeline_id: string; stage_id: string } }
   | { type: "send_whatsapp_message"; config: { channel_session_id: string; template: string } }
+  | {
+      type: "send_template";
+      config: {
+        channel_session_id: string;
+        template_name: string;
+        template_language: string;
+        template_values?: Record<string, string>;
+      };
+    }
   | {
       type: "send_ai_message";
       config: { agent_id: string; channel_session_id: string; instruction: string };
@@ -40,6 +50,8 @@ export function defaultActionConfig(type: ActionItem["type"]): ActionItem {
       return { type, config: { pipeline_id: "", stage_id: "" } };
     case "send_whatsapp_message":
       return { type, config: { channel_session_id: "", template: "" } };
+    case "send_template":
+      return { type, config: { channel_session_id: "", template_name: "", template_language: "" } };
     case "send_ai_message":
       return { type, config: { agent_id: "", channel_session_id: "", instruction: "" } };
     case "add_tag":
@@ -197,6 +209,108 @@ function SendWhatsappForm({
           {t("Respeitamos a janela de envio e o limite diário configurados para esse número em Conexões — fora da janela, a mensagem espera a próxima.")}
         </p>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Template APROVADO da Meta — diferente de `SendWhatsappForm` (texto livre):
+ * aqui o operador escolhe uma definição já aprovada pela plataforma, não
+ * escreve o corpo. É o único caminho que funciona fora da janela de 24h.
+ */
+function SendTemplateForm({
+  config,
+  onChange,
+}: FormProps<{
+  channel_session_id: string;
+  template_name: string;
+  template_language: string;
+  template_values?: Record<string, string>;
+}>) {
+  const t = useT();
+  const { data: sessions } = useChannelSessions();
+  const { data: templates, isLoading: templatesLoading } = useApprovedTemplates();
+
+  const chaveDoTemplate = config.template_name ? `${config.template_name} ${config.template_language}` : "";
+  const templateEscolhido = (templates ?? []).find(
+    (tpl) => tpl.name === config.template_name && tpl.language === config.template_language,
+  );
+
+  return (
+    <div className="space-y-3">
+      <div className="space-y-1">
+        <Label>{t("Número de WhatsApp")}</Label>
+        <Select
+          value={config.channel_session_id}
+          onValueChange={(v) => onChange({ ...config, channel_session_id: v })}
+        >
+          <SelectTrigger>
+            <SelectValue placeholder={t("Escolha o número")} />
+          </SelectTrigger>
+          <SelectContent>
+            {(sessions ?? []).map((s) => (
+              <SelectItem key={s.id} value={s.id} disabled={s.status !== "WORKING"}>
+                {channelLabel(s) + (s.status !== "WORKING" ? " — desconectado" : "")}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="space-y-1">
+        <Label>{t("Template aprovado")}</Label>
+        <Select
+          value={chaveDoTemplate}
+          onValueChange={(v) => {
+            const [name, language] = v.split(" ");
+            onChange({ ...config, template_name: name ?? "", template_language: language ?? "", template_values: {} });
+          }}
+          disabled={templatesLoading}
+        >
+          <SelectTrigger>
+            <SelectValue placeholder={t("Escolha um template aprovado")} />
+          </SelectTrigger>
+          <SelectContent>
+            {(templates ?? []).map((tpl) => (
+              <SelectItem key={`${tpl.name} ${tpl.language}`} value={`${tpl.name} ${tpl.language}`}>
+                {tpl.name} ({tpl.language})
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {!templatesLoading && (templates ?? []).length === 0 ? (
+          <p className="text-xs text-muted-foreground">
+            {t("Nenhum template aprovado ainda. Sincronize em Conexões ou aguarde a Meta aprovar um.")}
+          </p>
+        ) : null}
+      </div>
+
+      {templateEscolhido && templateEscolhido.slots.length > 0 ? (
+        <div className="space-y-2 rounded-sm border border-border p-2">
+          <p className="text-xs text-muted-foreground">
+            {t("Este template tem variável — preencha cada uma (aceita {{nome}}, {{telefone}}, {{lead.title}}):")}
+          </p>
+          {templateEscolhido.slots.map((slot) => (
+            <div key={slot.key} className="space-y-1">
+              <Label className="text-xs">{slot.key} — {slot.onde}</Label>
+              <Input
+                value={config.template_values?.[slot.key] ?? ""}
+                onChange={(e) =>
+                  onChange({
+                    ...config,
+                    template_values: { ...config.template_values, [slot.key]: e.target.value },
+                  })
+                }
+                placeholder="{{nome}}"
+              />
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      <p className="text-xs text-muted-foreground">
+        {t("Respeitamos a janela de envio e o limite diário configurados para esse número em Conexões. Cada template enviado tem custo de conversa na Meta — e nunca é reenviado duas vezes ao mesmo contato.")}
+      </p>
     </div>
   );
 }
@@ -440,6 +554,13 @@ export function ActionConfigForm({
     case "send_whatsapp_message":
       return (
         <SendWhatsappForm
+          config={action.config}
+          onChange={(config) => onChange({ type: action.type, config })}
+        />
+      );
+    case "send_template":
+      return (
+        <SendTemplateForm
           config={action.config}
           onChange={(config) => onChange({ type: action.type, config })}
         />

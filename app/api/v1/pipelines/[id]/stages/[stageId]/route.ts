@@ -44,6 +44,9 @@ const bodySchema = z
     is_won: z.boolean().optional(),
     is_lost: z.boolean().optional(),
     depois_de: z.string().min(1).nullable().optional(),
+    // Limiar de "esfriou" desta etapa (Radar de Risco) — 90 dias é sanidade,
+    // não regra de negócio. `null` volta ao padrão global (24h/72h).
+    expected_duration_hours: z.number().int().positive().max(24 * 90).nullable().optional(),
   })
   .strict()
   .refine((b) => Object.keys(b).length > 0, { message: "Nada para alterar." });
