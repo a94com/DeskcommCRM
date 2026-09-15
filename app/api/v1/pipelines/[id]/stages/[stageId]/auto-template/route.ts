@@ -49,12 +49,20 @@ async function acharRegraDaEtapa(
   orgId: string,
   stageId: string,
 ) {
+  // NÃO usar `.contains("conditions", array)` aqui: o supabase-js só serializa
+  // como JSON quando o valor é um OBJETO (`.contains("metadata", {...})` em
+  // admin/incidents funciona por isso). Pra um ARRAY, ele assume coluna
+  // `text[]` do Postgres e faz `value.join(',')` (funciona pra
+  // `.contains("tags", [tag])` acima) — aplicado a um array de OBJETOS vira
+  // `{[object Object]}`, e o Postgres rejeita com "invalid input syntax for
+  // type json". `conditions` é jsonb guardando um array; `.filter(...,"cs",...)`
+  // manda a string já serializada direto, sem essa reinterpretação.
   const { data, error } = await supabase
     .from("automation_rules")
     .select("*")
     .eq("organization_id", orgId)
     .eq("trigger_event", "lead.stage_changed")
-    .contains("conditions", CONDICAO_DE_ETAPA(stageId))
+    .filter("conditions", "cs", JSON.stringify(CONDICAO_DE_ETAPA(stageId)))
     .maybeSingle();
   if (error) throw new Error(error.message);
   return data as {
