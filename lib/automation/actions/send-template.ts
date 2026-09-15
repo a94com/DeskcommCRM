@@ -49,37 +49,38 @@ function lerConfig(config: Record<string, unknown>): ConfigDeTemplate | null {
 }
 
 /**
- * A trava contra reenvio duplicado (pedido do usuário, 2026-09): se esse
- * CONTATO já recebeu ESTE template antes — em qualquer conversa, disparado por
- * qualquer caminho —, pula em vez de mandar de novo. Cobre o caso de o lead
- * sair da etapa e voltar (de propósito ou sem querer), sem depender de quem
- * moveu ter visto ou confirmado nada — é a garantia de verdade; o aviso na
- * tela de mover (`MoverEtapa`/`KanbanBoard`) é só pra evitar surpresa.
- *
- * Reaproveita `messages.template_name` + `messages_template_idx`
- * (organization_id, template_name) que já existem pra outra finalidade —
- * nenhuma tabela ou índice novo.
- */
-/**
  * O texto que o LEAD vai ler, com os `{{n}}` já substituídos — mesma função
  * que o agente usa (`inbound-turn.ts`) e que a tela manual monta ANTES de
  * chamar `/api/v1/messages` (`JanelaFechadaAviso.tsx`). Sem isto, `body` fica
  * vazio: `_handler.ts` só grava `template_name`/`template_language` no envio
  * (linha "Colunas só do template"), então o Inbox mostra um balão em branco
  * mesmo com a Meta tendo aceitado e entregue o template de verdade — achado ao
- * conferir dois envios reais desta automação (2026-09-15).
+ * conferir envios reais desta automação (2026-09-15).
  *
- * Falha de leitura ou espelho vazio: mesma postura de `conferirDefinicao`
- * ("não espelhada, deixa passar") — devolve `""` em vez de barrar o envio, já
- * que o texto é só para exibição local; a Meta renderiza o template aprovado
- * do lado dela independente disto.
+ * Duas tentativas, não uma: primeiro filtra por `channel_session_id` (dois
+ * números podem ter modelos com o MESMO nome e texto diferente); se não achar,
+ * repete sem esse filtro. Precisa da segunda porque `meta_templates.channel_
+ * session_id` é NULL em instalação anterior à sincronização por sessão — é
+ * assim que `GET /api/v1/channels/templates` já lê (só por organization_id,
+ * sem essa coluna), e foi por só tentar a primeira que o `body` saiu vazio de
+ * novo mesmo DEPOIS desta função existir: a linha real de "etapa2" tem
+ * `channel_session_id` nulo, então o filtro exato nunca achava nada.
+ *
+ * Falha de leitura ou espelho vazio nas duas tentativas: mesma postura de
+ * `conferirDefinicao` ("não espelhada, deixa passar") — devolve `""` em vez de
+ * barrar o envio, já que o texto é só para exibição local; a Meta renderiza o
+ * template aprovado do lado dela independente disto.
  */
 async function corpoRenderizado(
   ctx: ActionCtx,
   parsed: ConfigDeTemplate,
   template_values: Record<string, string>,
 ): Promise<string> {
-  const { data, error } = await ctx.admin
+  // Duas consultas INDEPENDENTES, não a mesma reaproveitada com mais um
+  // `.eq()`: o builder do supabase-js é mutável — encadear a segunda tentativa
+  // em cima da primeira acumularia o filtro de `channel_session_id` que a
+  // segunda tentativa existe justamente para não ter.
+  let { data, error } = await ctx.admin
     .from("meta_templates")
     .select("components, parameter_format")
     .eq("organization_id", ctx.organizationId)
@@ -87,7 +88,17 @@ async function corpoRenderizado(
     .eq("language", parsed.template_language)
     .eq("channel_session_id", parsed.channel_session_id)
     .maybeSingle();
+  if (!error && !data) {
+    ({ data, error } = await ctx.admin
+      .from("meta_templates")
+      .select("components, parameter_format")
+      .eq("organization_id", ctx.organizationId)
+      .eq("name", parsed.template_name)
+      .eq("language", parsed.template_language)
+      .maybeSingle());
+  }
   if (error || !data) return "";
+
   const linha = data as { components: unknown; parameter_format?: string };
   try {
     return renderTemplateBody(linha.components, template_values, {
@@ -100,6 +111,18 @@ async function corpoRenderizado(
   }
 }
 
+/**
+ * A trava contra reenvio duplicado (pedido do usuário, 2026-09): se esse
+ * CONTATO já recebeu ESTE template antes — em qualquer conversa, disparado por
+ * qualquer caminho —, pula em vez de mandar de novo. Cobre o caso de o lead
+ * sair da etapa e voltar (de propósito ou sem querer), sem depender de quem
+ * moveu ter visto ou confirmado nada — é a garantia de verdade; o aviso na
+ * tela de mover (`MoverEtapa`/`KanbanBoard`) é só pra evitar surpresa.
+ *
+ * Reaproveita `messages.template_name` + `messages_template_idx`
+ * (organization_id, template_name) que já existem pra outra finalidade —
+ * nenhuma tabela ou índice novo.
+ */
 async function jaEnviadoAEsteContato(
   ctx: ActionCtx,
   contactId: string,

@@ -47,22 +47,34 @@ const CONTATO = "33333333-3333-4333-8333-333333333333";
  * `componentes`, cai no fallback "não espelhada" (`data: null`) e
  * `corpoRenderizado` devolve `""` — os casos que checam o texto de verdade
  * passam `componentes`.
+ *
+ * `channelSessionIdNulo: true` simula a linha real que causou o balão vazio
+ * mesmo DEPOIS da primeira correção (2026-09-15): `meta_templates.channel_
+ * session_id` é NULL, então a consulta com esse filtro nunca acha nada — só a
+ * segunda tentativa (sem o filtro) acha. Rastreia se `.eq("channel_session_id"`
+ * entrou na cadeia desta chamada pra decidir qual das duas respostas devolver.
  */
 function bancoFalso(opts: {
   jaEnviado: boolean;
   erroNaLeitura?: boolean;
   componentes?: Array<{ type: string; text: string }>;
+  channelSessionIdNulo?: boolean;
 }) {
   const from = vi.fn((tabela: string) => {
     if (tabela === "meta_templates") {
-      const encadeavelTpl: Record<string, unknown> = {};
-      for (const metodo of ["select", "eq"]) {
-        encadeavelTpl[metodo] = () => encadeavelTpl;
-      }
-      encadeavelTpl.maybeSingle = async () =>
-        opts.componentes
-          ? { data: { components: opts.componentes, parameter_format: "POSITIONAL" }, error: null }
-          : { data: null, error: null };
+      let filtrouPorSessao = false;
+      const encadeavelTpl: Record<string, unknown> = {
+        select: () => encadeavelTpl,
+        eq: (campo: string) => {
+          if (campo === "channel_session_id") filtrouPorSessao = true;
+          return encadeavelTpl;
+        },
+      };
+      encadeavelTpl.maybeSingle = async () => {
+        if (!opts.componentes) return { data: null, error: null };
+        if (opts.channelSessionIdNulo && filtrouPorSessao) return { data: null, error: null };
+        return { data: { components: opts.componentes, parameter_format: "POSITIONAL" }, error: null };
+      };
       return encadeavelTpl;
     }
     if (tabela !== "messages") throw new Error(`Tabela não prevista: ${tabela}`);
@@ -189,6 +201,23 @@ describe("send_template — caminho feliz", () => {
 
     const [, , input] = sendMessageHandler.mock.calls[0]!;
     expect((input as { body: string }).body).toBe("Oi Genivaldo! Tudo bem?");
+  });
+
+  it("channel_session_id nulo na linha real: cai pra segunda tentativa e ainda acha o texto", async () => {
+    // Regressão exata do relato do usuário com o lead Edivaldo (2026-09-15):
+    // o primeiro fix passou a buscar o texto, mas só tentava COM o filtro de
+    // sessão — a linha de "etapa2" tem essa coluna nula, então a primeira
+    // tentativa sempre voltava vazia e o balão continuou em branco.
+    const admin = bancoFalso({
+      jaEnviado: false,
+      componentes: [{ type: "BODY", text: "Oi! Tudo bem?" }],
+      channelSessionIdNulo: true,
+    });
+
+    await executar(contexto(admin));
+
+    const [, , input] = sendMessageHandler.mock.calls[0]!;
+    expect((input as { body: string }).body).toBe("Oi! Tudo bem?");
   });
 
   it("template não espelhado (sem componentes) manda body vazio, não falha o envio", async () => {
