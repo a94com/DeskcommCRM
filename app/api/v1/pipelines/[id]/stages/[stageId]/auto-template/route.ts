@@ -34,15 +34,38 @@ interface RouteCtx {
 
 const CONDICAO_DE_ETAPA = (stageId: string) => [{ field: "event.to_stage_id", op: "eq", value: stageId }];
 
+/**
+ * `channel_session_id`/`template_name`/`template_language` só são
+ * obrigatórios quando `enabled: true` — o pop-up (`StageConfigDialog.tsx`)
+ * sempre manda os três campos no corpo, mas com string vazia quando o
+ * disparo automático está desligado (o `useState` deles nunca é populado
+ * nesse caso). Exigi-los sempre aqui fazia TODA etapa sem disparo configurado
+ * falhar com 422 ao salvar só o "lead frio" — mesmo o handler já sabendo lidar
+ * com "desligar sem nunca ter existido regra" (linha do early-return abaixo).
+ * Achado ao vivo (2026-09-16): usuário não conseguia salvar em nenhuma coluna
+ * além da que já tinha o disparo configurado.
+ */
 const putBodySchema = z
   .object({
     enabled: z.boolean(),
-    channel_session_id: z.string().uuid(),
-    template_name: z.string().min(1).max(512),
-    template_language: z.string().min(1).max(20),
+    channel_session_id: z.string().optional().nullable(),
+    template_name: z.string().max(512).optional().nullable(),
+    template_language: z.string().max(20).optional().nullable(),
     template_values: z.record(z.string(), z.string().max(2000)).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((val, ctx) => {
+    if (!val.enabled) return;
+    if (!val.channel_session_id || !z.string().uuid().safeParse(val.channel_session_id).success) {
+      ctx.addIssue({ code: "custom", path: ["channel_session_id"], message: "Escolha um número de WhatsApp." });
+    }
+    if (!val.template_name) {
+      ctx.addIssue({ code: "custom", path: ["template_name"], message: "Escolha um template aprovado." });
+    }
+    if (!val.template_language) {
+      ctx.addIssue({ code: "custom", path: ["template_language"], message: "Escolha um template aprovado." });
+    }
+  });
 
 async function acharRegraDaEtapa(
   supabase: Awaited<ReturnType<typeof createClient>>,
@@ -177,13 +200,28 @@ export async function PUT(req: NextRequest, ctx: RouteCtx): Promise<Response> {
     return ok({ enabled: false }, { requestId });
   }
 
+  // Só DESLIGAR (sem trocar canal/template) não manda os três campos de
+  // novo — ver o comentário do schema. Sem isto, um `enabled:false` que
+  // chegasse com esses campos vazios reescreveria a config salva da regra
+  // com lixo, em vez de só virar `is_active:false` preservando o que já
+  // estava configurado.
+  const acaoAnterior = regraAtual?.actions.find((a) => a.type === "send_template");
+  const configAnterior = (acaoAnterior?.config ?? {}) as {
+    channel_session_id?: string;
+    template_name?: string;
+    template_language?: string;
+  };
+  const channelSessionId = parsed.data.channel_session_id || configAnterior.channel_session_id || null;
+  const templateName = parsed.data.template_name || configAnterior.template_name || null;
+  const templateLanguage = parsed.data.template_language || configAnterior.template_language || null;
+
   const actionsBrutas = [
     {
       type: "send_template",
       config: {
-        channel_session_id: parsed.data.channel_session_id,
-        template_name: parsed.data.template_name,
-        template_language: parsed.data.template_language,
+        channel_session_id: channelSessionId,
+        template_name: templateName,
+        template_language: templateLanguage,
         ...(parsed.data.template_values ? { template_values: parsed.data.template_values } : {}),
       },
     },
