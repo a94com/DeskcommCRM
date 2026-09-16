@@ -59,8 +59,23 @@ export function ehIdentificadorTecnico(valor: string): boolean {
 }
 
 /**
- * O rótulo. Primeiro o que uma pessoa escolheu, depois o que o canal informou,
- * depois o número — e só então a admissão de que não se sabe o nome.
+ * O rótulo. Primeiro o nome CADASTRADO — o que a pessoa que atende digitou no
+ * "Nome" do contato (`EditContactDialog`) ou o que veio no lead capturado por
+ * webhook/importação de planilha (`name`, ver `webhooks/in/[token]/route.ts`
+ * e `leads/import/route.ts`) —, só depois o que o CANAL informou por conta
+ * própria (`display_name`: o nome de perfil que a Meta manda no primeiro
+ * WhatsApp do contato, `fn_upsert_wa_contact` → coluna preenchida uma vez e
+ * nunca mais tocada), e por último o número.
+ *
+ * A ORDEM INVERTIDA esteve aqui antes e é o bug que o usuário relatou
+ * (2026-09-16): lead cadastrado com nome próprio, mas assim que ele manda a
+ * PRIMEIRA mensagem no WhatsApp, `display_name` nasce com o nome de perfil
+ * dele — e como esta função olhava `display_name` primeiro, o nome cadastrado
+ * ficava enterrado atrás do nome do WhatsApp em toda tela (Inbox, card do
+ * Kanban, prompt da IA), mesmo sem `name` nunca ter sido apagado do banco.
+ * Pelo mesmo motivo, corrigir o nome à mão no diálogo de contato (que só
+ * grava em `name`) também não aparecia — a correção existia no banco e
+ * continuava invisível.
  *
  * Celular BR aparece COM o nono dígito: `+553284793302` e `+5532984793302` são
  * a mesma pessoa, e o 9 é o que o atendente espera copiar.
@@ -71,7 +86,7 @@ export function rotuloDoContato(
 ): string {
   if (!c) return t(SEM_NOME);
 
-  const candidatos = [c.display_name, c.name];
+  const candidatos = [c.name, c.display_name];
   for (const bruto of candidatos) {
     const v = (bruto ?? "").trim();
     if (v !== "" && !ehIdentificadorTecnico(v)) return v;

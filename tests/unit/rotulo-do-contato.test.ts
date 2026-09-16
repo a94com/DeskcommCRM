@@ -44,19 +44,32 @@ describe("ehIdentificadorTecnico", () => {
 });
 
 describe("rotuloDoContato", () => {
-  it("prefere o nome que uma pessoa escolheu", () => {
+  it("prefere o nome CADASTRADO ao nome que o canal informou por conta própria", () => {
+    // Regressão do bug relatado pelo usuário (2026-09-16): lead importado com
+    // nome próprio (grava em `name`) que, ao mandar a primeira mensagem no
+    // WhatsApp, ganha um `display_name` = nome de perfil do app — sem isto o
+    // nome cadastrado ficava enterrado atrás do nome do WhatsApp em toda tela.
     expect(rotuloDoContato({ display_name: "Kaio Gomes", name: "Kaio G", phone_number: "+5531988887777" })).toBe(
+      "Kaio G",
+    );
+  });
+
+  it("sem nome cadastrado, cai para o que o canal informou", () => {
+    expect(rotuloDoContato({ display_name: "Kaio Gomes", name: null, phone_number: "+5531988887777" })).toBe(
       "Kaio Gomes",
     );
   });
 
-  it("pula o display_name TÉCNICO e usa o que vier depois", () => {
-    // Era o caso vivo na produção: 3 contatos com o rótulo inventado gravado.
-    // Sem esta regra, consertar o título do lead para ler do cadastro faria
-    // `Contato 543134@lid` aparecer no card do kanban.
+  it("pula o nome TÉCNICO (de qualquer uma das duas colunas) e usa o que vier depois", () => {
+    // Era o caso vivo na produção: 3 contatos com o rótulo inventado gravado
+    // em `display_name`. Sem esta regra, consertar o título do lead para ler
+    // do cadastro faria `Contato 543134@lid` aparecer no card do kanban.
     expect(
       rotuloDoContato({ display_name: "Contato 543134@lid", name: null, phone_number: "+5531988887777" }),
     ).toBe("+5531988887777");
+    expect(
+      rotuloDoContato({ display_name: "Ana Souza", name: "Contato 543134@lid", phone_number: "+5531988887777" }),
+    ).toBe("Ana Souza");
   });
 
   it("o TELEFONE vale mais que 'Sem nome' — e duas telas o ignoravam", () => {
