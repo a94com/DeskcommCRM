@@ -142,9 +142,26 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
         .eq("name", e.templateName)
         .eq("language", e.templateLanguage);
     } else {
+      // `errorCode`/`errorTitle` só vêm preenchidos quando `status === "failed"`
+      // (ver `webhook.ts` — extraídos de `raw.errors[0]`, que só existe na
+      // entrega mal-sucedida). Gravá-los incondicionalmente é inofensivo: em
+      // qualquer outro status os dois são `null`, e o `update` não teria como
+      // "limpar por engano" um erro anterior — a linha já está `sent` antes de
+      // uma falha real chegar.
+      //
+      // Sem isto, TODA falha reportada pela Meta virava `messages.status =
+      // 'failed'` com `error_code`/`error_message` sempre vazios — a Central
+      // e o Inbox mostravam "Falhou" sem nunca dizer POR QUÊ. Achado ao
+      // investigar um envio automático real que ficou "Falhou" sem motivo
+      // (2026-09-16).
       await admin
         .from("messages")
-        .update({ status: e.status === "failed" ? "failed" : "sent", updated_at: now })
+        .update({
+          status: e.status === "failed" ? "failed" : "sent",
+          error_code: e.errorCode !== null ? String(e.errorCode) : null,
+          error_message: e.errorTitle,
+          updated_at: now,
+        })
         .eq("organization_id", session.organizationId)
         .eq("external_id", e.externalId);
     }
